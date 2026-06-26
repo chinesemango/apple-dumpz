@@ -22,6 +22,19 @@
 })();
 
   -->
+
+
+  <!--
+  //lockdown fingerprint
+  javascript
+const t = performance.now();
+let x = 0;
+for (let i = 0; i < 1000000; i++) x += Math.sqrt(i);
+const delta = performance.now() - t;
+// delta < 10ms = Lockdown Mode OFF
+// delta > 20ms = Lockdown Mode ON
+
+  -->
   
 <h1>Lockdown Mode Regex DoS</h1>
 <p id="status">Starting...</p>
